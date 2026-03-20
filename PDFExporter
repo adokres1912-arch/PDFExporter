@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>PDF Ink Annotator — Tools, Palette, Text (Single-file)</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #fafafa; }
+  #toolbar { position: sticky; top: 0; background: #fff; padding: 8px 12px; display: flex; gap: 12px; align-items: center; border-bottom: 1px solid #e6e6e6; z-index: 10; }
+  #viewer { padding: 16px; display: grid; gap: 28px; justify-content: center; }
+  .page-wrap { position: relative; display: inline-block; background: white; box-shadow: 0 2px 18px rgba(0,0,0,0.08); }
+  .pdf-canvas { display: block; }
+  .ink-canvas { position: absolute; inset: 0; cursor: crosshair; touch-action: none; }
+  .text-layer { position: absolute; inset: 0; pointer-events: none; } /* toggled to auto for Text tool */
+  .text-item { position: absolute; min-width: 8px; outline: 1px dashed transparent; white-space: pre; background: transparent; color: black; }
+  .text-item[contenteditable="true"] { outline-color: #8bb; background: #f7faff; }
+
+  /* Controls */
+  .tool-btn, .dropdown-btn { border: 1px solid #ddd; background: #fff; color: black; border-radius: 6px; padding: 6px 10px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+  .tool-btn:hover, .dropdown-btn:hover { background: #f4f4f4; }
+  .tool-btn.active { border-color: #1e88e5; box-shadow: 0 0 0 2px rgba(30,136,229,.15) inset; }
+  .icon { font-size: 16px; }
+  .palette { display: inline-flex; gap: 6px; align-items: center; }
+  .swatch { width: 22px; height: 22px; border-radius: 50%; border: 2px solid #ccc; cursor: pointer; box-sizing: border-box; }
+  .swatch.selected { border-color: #000; outline: 2px solid #0003; }
+  .sizes { position: relative; display: inline-block; }
+  .size-menu { position: absolute; top: 100%; left: 0; margin-top: 4px; background: #fff; border: 1px solid #ddd; border-radius: 8px; box-shadow: 0 6px 18px rgba(0,0,0,.1); padding: 6px; display: none; z-index: 20; }
+  .size-menu.open { display: block; }
+  .size-option { display: flex; align-items: center; gap: 8px; padding: 6px 8px; cursor: pointer; border-radius: 6px; }
+  .size-option:hover { background: #f5f5f5; }
+  .size-dot { width: 36px; height: 0; border-radius: 6px; background: currentColor; }
+  .grow { flex: 1; }
+  button { color: black; } /* ensure black text on all buttons */
+  #diag { font-size: 12px; color: #666; padding: 6px 12px; border-bottom: 1px dashed #ccc; }
+</style>
+</head>
+<body>
+  <div id="toolbar">
+    <input type="file" id="file" accept="application/pdf" />
+
+    <!-- Tools -->
+    <button id="tool-pen" class="tool-btn active" title="Draw (Apple Pencil / mouse)">
+      <span class="icon">✏️</span><span>Draw</span>
+    </button>
+    <button id="tool-eraser" class="tool-btn" title="Erase strokes">
+      <span class="icon">🧽</span><span>Eraser</span>
+    </button>
+    <button id="tool-text" class="tool-btn" title="Text tool">
+      <span class="icon">🅰️</span><span>Text</span>
+    </button>
+
+    <!-- Palette -->
+    <div class="palette" aria-label="Color palette">
+      <div class="swatch" data-color="#000000" style="background:#000000"></div>
+      <div class="swatch" data-color="#D32F2F" style="background:#D32F2F"></div>
+      <div class="swatch" data-color="#1976D2" style="background:#1976D2"></div>
+      <div class="swatch" data-color="#388E3C" style="background:#388E3C"></div>
+      <div class="swatch" data-color="#FBC02D" style="background:#FBC02D"></div>
+      <div class="swatch" data-color="#F57C00" style="background:#F57C00"></div>
+      <div class="swatch" data-color="#7B1FA2" style="background:#7B1FA2"></div>
+      <div class="swatch" data-color="#00ACC1" style="background:#00ACC1"></div>
+    </div>
+
+    <!-- Size dropdown -->
+    <div class="sizes">
+      <button id="size-btn" class="dropdown-btn" title="Choose size"><span class="icon">⬇️</span><span id="size-label">Size: 3</span></button>
+      <div id="size-menu" class="size-menu" role="menu" aria-label="Size">
+        <!-- options filled by JS -->
+      </div>
+    </div>
+
+    <div class="grow"></div>
+    <button id="undo" class="tool-btn" type="button" title="Undo last stroke on current page">Undo</button>
+    <button id="clear" class="tool-btn" type="button" title="Clear strokes on current page">Clear page</button>
+    <button id="export" class="tool-btn" type="button" title="Export annotated PDF">Export (vector)</button>
+  </div>
+
+  <div id="diag"></div>
+  <div id="viewer"></div>
+
+  <!-- PDF.js 2.x (worker disabled below for file:// usage) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+  <!-- pdf-lib -->
+  <script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
+
+  <script>
+    // ===== Diagnostics =====
+    const diag = document.getElementById('diag');
+    function logDiag(msg) { console.log('[Annotator]', msg); diag.textContent = msg; }
+
+    // PDF.js setup for file://
+    if (window.pdfjsLib) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = null;
+      pdfjsLib.disableWorker = true;
+      logDiag('PDF.js loaded (worker disabled for file://).');
+    } else {
+      logDiag('Error: PDF.js failed to load from CDN.');
+    }
+    if (!window.PDFLib) logDiag('Error: pdf-lib failed to load from CDN.');
+
+    // ===== DOM refs =====
+    const viewer = document.getElementById('viewer');
+    const fileInput = document.getElementById('file');
+    const undoBtn = document.getElementById('undo');
+    const clearBtn = document.getElementById('clear');
+    const exportBtn = document.getElementById('export');
+    const toolPenBtn = document.getElementById('tool-pen');
+    const toolEraserBtn = document.getElementById('tool-eraser');
+    const toolTextBtn = document.getElementById('tool-text');
+    const sizeBtn = document.getElementById('size-btn');
+    const sizeMenu = document.getElementById('size-menu');
+    const sizeLabel = document.getElementById('size-label');
+    const palette = document.querySelector('.palette');
+
+    // ===== State =====
+    const SIZES = [1,2,3,4,6,8,12];
+    let currentTool = 'pen'; // 'pen' | 'eraser' | 'text'
+    let currentColor = '#000000';
+    let brushSize = 3;
+    let textSize = 16; // px
+    let pdfDocJS = null;
+    let pdfBytesOriginal = null;
+
+    // Per page:
+    // strokes: [{ color, size, points:[{x,y,pressure}] }]
+    // texts  : [{ x, y, color, size, value }]
+    const pageData = []; // index = page - 1
+    const pageLayers = []; // store layers per page: {inkCanvas, textLayer, wrap}
+
+    // Initialize palette default selection
+    (function initPalette(){
+      const swatches = document.querySelectorAll('.swatch');
+      swatches.forEach((sw,i) => {
+        sw.addEventListener('click', () => {
+          swatches.forEach(s=>s.classList.remove('selected'));
+          sw.classList.add('selected');
+          currentColor = sw.dataset.color;
+        });
+      });
+      // select first
+      swatches[0].classList.add('selected');
+    })();
+
+    // Build size menu
+    (function initSizeMenu(){
+      SIZES.forEach(size => {
+        const row = document.createElement('div');
+        row.className = 'size-option';
+        row.setAttribute('role','menuitem');
+        const dot = document.createElement('div');
+        dot.className = 'size-dot';
+        dot.style.height = `${size}px`;
+        dot.style.background = '#000';
+        const label = document.createElement('span');
+        label.textContent = size;
+        row.appendChild(dot);
+        row.appendChild(label);
+        row.addEventListener('click', () => {
+          if (currentTool === 'text') {
+            textSize = Math.max(10, size * 4); // simple mapping: brush 1→ font 12-ish
+            sizeLabel.textContent = `Text: ${textSize}px`;
+          } else {
+            brushSize = size;
+            sizeLabel.textContent = `Size: ${brushSize}`;
+          }
+          sizeMenu.classList.remove('open');
+        });
+        sizeMenu.appendChild(row);
+      });
+      sizeLabel.textContent = `Size: ${brushSize}`;
+      
+sizeBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  sizeMenu.classList.toggle('open');
+});
+
+      
+      document.addEventListener('click', (e)=>{
+      if (!sizeMenu.contains(e.target) && !sizeBtn.contains(e.target)) {
+        sizeMenu.classList.remove('open');
+      }
+    });
+    })();
+
+    // Tool switching
+    function setTool(tool){
+      currentTool = tool;
+      toolPenBtn.classList.toggle('active', tool==='pen');
+      toolEraserBtn.classList.toggle('active', tool==='eraser');
+      toolTextBtn.classList.toggle('active', tool==='text');
+
+      // Toggle pointer-events for text layers
+      pageLayers.forEach(l => {
+        if (!l) return;
+        l.textLayer.style.pointerEvents = (tool==='text') ? 'auto' : 'none';
+        l.inkCanvas.style.cursor = (tool==='eraser') ? 'cell' : 'crosshair';
+      });
+
+      // Update size label mode
+      if (tool==='text') sizeLabel.textContent = `Text: ${textSize}px`;
+      else sizeLabel.textContent = `Size: ${brushSize}`;
+    }
+    toolPenBtn.addEventListener('click', ()=>setTool('pen'));
+    toolEraserBtn.addEventListener('click', ()=>setTool('eraser'));
+    toolTextBtn.addEventListener('click', ()=>setTool('text'));
+
+    // File loader
+    fileInput.addEventListener('change', async (e) => {
+      try {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        pdfBytesOriginal = await file.arrayBuffer();
+        await loadPDF(pdfBytesOriginal);
+      } catch (err) {
+        console.error(err);
+        logDiag('Failed to load PDF. See console for details.');
+        alert('Failed to load PDF. See console for details.');
+      }
+    });
+
+    async function loadPDF(arrayBuffer) {
+      viewer.innerHTML = '';
+      pageData.length = 0;
+      pageLayers.length = 0;
+
+      logDiag('Loading PDF…');
+      const task = pdfjsLib.getDocument({ data: arrayBuffer });
+      pdfDocJS = await task.promise;
+      logDiag(`PDF loaded: ${pdfDocJS.numPages} page(s).`);
+
+      for (let i = 1; i <= pdfDocJS.numPages; i++) {
+        const page = await pdfDocJS.getPage(i);
+        const scale = 1.5;
+        const viewport = page.getViewport({ scale });
+
+        const wrap = document.createElement('div');
+        wrap.className = 'page-wrap';
+        wrap.style.width  = viewport.width + 'px';
+        wrap.style.height = viewport.height + 'px';
+
+        const pdfCanvas = document.createElement('canvas');
+        pdfCanvas.className = 'pdf-canvas';
+        pdfCanvas.width  = viewport.width;
+        pdfCanvas.height = viewport.height;
+        wrap.appendChild(pdfCanvas);
+
+        const ctx = pdfCanvas.getContext('2d', { alpha: false });
+        await page.render({ canvasContext: ctx, viewport }).promise;
+
+        const inkCanvas = document.createElement('canvas');
+        inkCanvas.className = 'ink-canvas';
+        inkCanvas.width  = viewport.width;
+        inkCanvas.height = viewport.height;
+        wrap.appendChild(inkCanvas);
+
+        const textLayer = document.createElement('div');
+        textLayer.className = 'text-layer';
+        wrap.appendChild(textLayer);
+
+        pageData[i-1] = {
+          strokes: [],
+          texts: [],
+          viewportWidth: viewport.width,
+          viewportHeight: viewport.height
+        };
+        pageLayers[i-1] = { inkCanvas, textLayer, wrap };
+
+        setupPageInteractions(i-1);
+        viewer.appendChild(wrap);
+      }
+
+      // Respect current tool (esp. text layer pointer events)
+      setTool(currentTool);
+      logDiag('Ready. Use the toolbar to draw, erase, color, size, or add text.');
+    }
+
+    // ----- Per-page interactions -----
+    function setupPageInteractions(pageIndex){
+      const { inkCanvas, textLayer } = pageLayers[pageIndex];
+      const ctx = inkCanvas.getContext('2d');
+
+      // Drawing
+      let drawing = false;
+      let currentStroke = null;
+
+      function redraw() {
+        ctx.clearRect(0,0,inkCanvas.width, inkCanvas.height);
+        // re-draw strokes
+        for (const s of pageData[pageIndex].strokes) drawStroke(ctx, s);
+        // text layer is HTML elements, no need to draw here
+      }
+
+      function drawStroke(ctx, stroke) {
+        const pts = stroke.points;
+        if (pts.length < 2) {
+          if (pts.length === 1) {
+            ctx.fillStyle = stroke.color;
+            const r = stroke.size * (pts[0].pressure || 1);
+            ctx.beginPath();
+            ctx.arc(pts[0].x, pts[0].y, r / 2, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          return;
+        }
+        ctx.strokeStyle = stroke.color;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.lineWidth = stroke.size;
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) {
+          ctx.lineWidth = stroke.size * (pts[i].pressure || 1);
+          ctx.lineTo(pts[i].x, pts[i].y);
+        }
+        ctx.stroke();
+      }
+
+      function getPosOnCanvas(e, canvas) {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: (e.clientX - rect.left) * (canvas.width  / rect.width),
+          y: (e.clientY - rect.top)  * (canvas.height / rect.height),
+          pressure: e.pressure && e.pressure > 0 ? e.pressure : 1.0
+        };
+      }
+
+      // Pen & Eraser pointer events on the ink canvas
+      inkCanvas.addEventListener('pointerdown', (e) => {
+        if (currentTool === 'pen') {
+          inkCanvas.setPointerCapture(e.pointerId);
+          drawing = true;
+          currentStroke = { color: currentColor, size: brushSize, points: [] };
+          currentStroke.points.push(getPosOnCanvas(e, inkCanvas));
+          e.preventDefault();
+        } else if (currentTool === 'eraser') {
+          inkCanvas.setPointerCapture(e.pointerId);
+          eraseAt(getPosOnCanvas(e, inkCanvas), brushSize*2);
+          e.preventDefault();
+        }
+      });
+
+      inkCanvas.addEventListener('pointermove', (e) => {
+        if (currentTool === 'pen' && drawing) {
+          currentStroke.points.push(getPosOnCanvas(e, inkCanvas));
+          const last = currentStroke.points.slice(-2);
+          const tmp = { ...currentStroke, points: last };
+          drawStroke(ctx, tmp);
+          e.preventDefault();
+        } else if (currentTool === 'eraser' && e.pressure !== 0) {
+          eraseAt(getPosOnCanvas(e, inkCanvas), brushSize*2);
+          e.preventDefault();
+        }
+      });
+
+      function endStroke(e) {
+        if (currentTool !== 'pen' || !drawing) return;
+        currentStroke.points.push(getPosOnCanvas(e, inkCanvas));
+        pageData[pageIndex].strokes.push(currentStroke);
+        drawing = false;
+        currentStroke = null;
+        redraw();
+      }
+      inkCanvas.addEventListener('pointerup', endStroke);
+      inkCanvas.addEventListener('pointercancel', endStroke);
+      inkCanvas.addEventListener('pointerleave', () => { if (drawing) endStroke(new PointerEvent('pointerup')); });
+
+      // Stroke-eraser: remove any stroke touched by eraser radius
+      function eraseAt(pos, radius){
+        const strokes = pageData[pageIndex].strokes;
+        let removed = false;
+        for (let s = strokes.length - 1; s >= 0; s--) {
+          if (strokeIntersectsCircle(strokes[s], pos, radius)) {
+            strokes.splice(s,1);
+            removed = true;
+          }
+        }
+        if (removed) redraw();
+      }
+      function strokeIntersectsCircle(stroke, pos, r){
+        const pts = stroke.points;
+        // Quick bbox check
+        let minx=Infinity,miny=Infinity,maxx=-Infinity,maxy=-Infinity;
+        for (const p of pts){ if(p.x<minx)minx=p.x; if(p.y<miny)miny=p.y; if(p.x>maxx)maxx=p.x; if(p.y>maxy)maxy=p.y; }
+        if (pos.x < minx-r || pos.x > maxx+r || pos.y < miny-r || pos.y > maxy+r) return false;
+        // Segment distance check
+        for (let i=1;i<pts.length;i++){
+          if (pointToSegmentDist(pos, pts[i-1], pts[i]) <= r) return true;
+        }
+        // Also check a single dot stroke
+        if (pts.length===1) {
+          const dx = pos.x - pts[0].x, dy = pos.y - pts[0].y;
+          return Math.hypot(dx,dy) <= r;
+        }
+        return false;
+      }
+      function pointToSegmentDist(p, a, b){
+        const vx = b.x - a.x, vy = b.y - a.y;
+        const wx = p.x - a.x, wy = p.y - a.y;
+        const c1 = vx*wx + vy*wy;
+        if (c1 <= 0) return Math.hypot(p.x-a.x, p.y-a.y);
+        const c2 = vx*vx + vy*vy;
+        if (c2 <= c1) return Math.hypot(p.x-b.x, p.y-b.y);
+        const t = c1 / c2;
+        const px = a.x + t*vx, py = a.y + t*vy;
+        return Math.hypot(p.x-px, p.y-py);
+      }
+
+      // Text tool (click to place)
+      textLayer.addEventListener('pointerdown', (e) => {
+        if (currentTool !== 'text') return;
+        const rect = textLayer.getBoundingClientRect();
+        const x = (e.clientX - rect.left) * (inkCanvas.width  / rect.width);
+        const y = (e.clientY - rect.top)  * (inkCanvas.height / rect.height);
+
+        // Create DOM text item for on-screen editing
+        const el = document.createElement('div');
+        el.className = 'text-item';
+        el.contentEditable = 'true';
+        el.style.left = `${x}px`;
+        el.style.top  = `${y}px`;
+        el.style.color = currentColor;
+        el.style.fontSize = `${textSize}px`;
+        el.style.lineHeight = '1.2';
+        el.style.pointerEvents = 'auto'; // allow interaction when tool is text
+        el.textContent = '';
+        textLayer.appendChild(el);
+        el.focus();
+
+        // Save item in model
+        const item = { x, y, color: currentColor, size: textSize, value: '' };
+        pageData[pageIndex].texts.push(item);
+
+        // Commit on blur or Enter
+        function commit(){
+          item.value = el.textContent || '';
+          if (item.value.trim() === '') {
+            // remove empty
+            const idx = pageData[pageIndex].texts.indexOf(item);
+            if (idx>=0) pageData[pageIndex].texts.splice(idx,1);
+            el.remove();
+          }
+          el.removeEventListener('blur', commit);
+          el.removeEventListener('keydown', onKey);
+        }
+        function onKey(ev){
+          if (ev.key === 'Escape') { el.blur(); }
+          if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) {
+            el.blur();
+          }
+        }
+        el.addEventListener('blur', commit);
+        el.addEventListener('keydown', onKey);
+
+        // Allow re-edit on double click (only when Text tool active)
+        el.addEventListener('dblclick', () => { if (currentTool==='text') { el.contentEditable='true'; el.focus(); } });
+        // When switching away from Text tool, freeze editing
+        document.addEventListener('tool-change', ()=>{ el.contentEditable = (currentTool==='text') ? 'true' : 'false'; });
+      });
+
+      // Toolbar actions scoped to current page
+      undoBtn.addEventListener('click', () => {
+        if (pageData[pageIndex].strokes.length > 0) {
+          pageData[pageIndex].strokes.pop();
+          redraw();
+        }
+      });
+
+      clearBtn.addEventListener('click', () => {
+        pageData[pageIndex].strokes = [];
+        // Clear text DOM & model on this page
+        pageData[pageIndex].texts = [];
+        textLayer.innerHTML = '';
+        redraw();
+      });
+    }
+
+    // Inform all elements about tool changes (for text editability)
+    function broadcastToolChange(){ document.dispatchEvent(new Event('tool-change')); }
+    ['click'].forEach(ev=>{
+      toolPenBtn.addEventListener(ev, broadcastToolChange);
+      toolEraserBtn.addEventListener(ev, broadcastToolChange);
+      toolTextBtn.addEventListener(ev, broadcastToolChange);
+    });
+
+    // ----- Export (vector) -----
+    exportBtn.addEventListener('click', async () => {
+      try {
+        if (!pdfBytesOriginal || !pageData.length) {
+          alert('Load a PDF and add some content first.');
+          return;
+        }
+
+        const { PDFDocument, rgb, LineCapStyle, LineJoinStyle, StandardFonts } = PDFLib;
+        const srcPdf = await PDFDocument.load(pdfBytesOriginal);
+        const outPdf = await PDFDocument.create();
+        const copied = await outPdf.copyPages(srcPdf, srcPdf.getPageIndices());
+
+        // Embed one font for all text
+        const font = await outPdf.embedFont(StandardFonts.Helvetica);
+
+        for (let i = 0; i < copied.length; i++) {
+          const page = copied[i];
+          outPdf.addPage(page);
+          const { width: pw, height: ph } = page.getSize();
+
+          const screenW = pageData[i].viewportWidth;
+          const screenH = pageData[i].viewportHeight;
+          const scaleX = pw / screenW;
+          const scaleY = ph / screenH;
+          const scaleAvg = (scaleX + scaleY) / 2;
+
+          // Strokes as vector lines
+          for (const s of pageData[i].strokes) {
+            const col = hexToRgb(s.color);
+            const color = rgb(col.r/255, col.g/255, col.b/255);
+            const pts = s.points;
+            if (!pts || pts.length === 0) continue;
+
+            if (pts.length === 1) {
+              const p0 = pts[0];
+              const x = p0.x * scaleX;
+              const y = ph - (p0.y * scaleY);
+              const thickness = Math.max(0.5, s.size * (p0.pressure || 1) * scaleAvg);
+              page.drawLine({
+                start: { x, y }, end: { x: x + 0.01, y },
+                thickness, color, lineCap: LineCapStyle.Round
+              });
+              continue;
+            }
+
+            for (let k = 1; k < pts.length; k++) {
+              const a = pts[k-1], b = pts[k];
+              const x1 = a.x * scaleX, y1 = ph - (a.y * scaleY);
+              const x2 = b.x * scaleX, y2 = ph - (b.y * scaleY);
+              const thickness = Math.max(0.5, s.size * (b.pressure || 1) * scaleAvg);
+              page.drawLine({
+                start: { x: x1, y: y1 },
+                end:   { x: x2, y: y2 },
+                thickness, color,
+                lineCap: LineCapStyle.Round, lineJoin: LineJoinStyle.Round
+              });
+            }
+          }
+
+          // Text items
+          for (const t of pageData[i].texts) {
+            const col = hexToRgb(t.color);
+            const color = rgb(col.r/255, col.g/255, col.b/255);
+            const sizePts = t.size * scaleAvg;
+            const x = t.x * scaleX;
+            // PDF origin is bottom-left; HTML text top-left → subtract ascent approximation
+            const yTop = t.y * scaleY;
+            const y = ph - yTop - sizePts * 0.8; // rough ascent factor
+            if (t.value && t.value.trim() !== '') {
+              page.drawText(t.value, { x, y, size: sizePts, font, color, lineHeight: sizePts * 1.2 });
+            }
+          }
+        }
+
+        const outBytes = await outPdf.save();
+        downloadBlob(new Blob([outBytes], { type: 'application/pdf' }), 'annotated-vector.pdf');
+      } catch (err) {
+        console.error(err);
+        alert('Export failed. See console for details.');
+      }
+    });
+
+    function downloadBlob(blob, filename) {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    }
+    function hexToRgb(hex) {
+      let c = hex.replace('#','');
+      if (c.length === 3) c = c.split('').map(x => x+x).join('');
+      const num = parseInt(c, 16);
+      return { r: (num>>16)&255, g: (num>>8)&255, b: num&255 };
+    }
+  </script>
+</body>
+</html>
+``
