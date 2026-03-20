@@ -2,55 +2,91 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>PDF Ink Annotator — Tools, Palette, Text (Single-file)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1"/>
+<title>PDF Annotator (Mobile‑friendly, Pan/Pinch Zoom)</title>
 <style>
-  :root { color-scheme: light dark; }
-  body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #fafafa; }
-  #toolbar { position: sticky; top: 0; background: #fff; padding: 8px 12px; display: flex; gap: 12px; align-items: center; border-bottom: 1px solid #e6e6e6; z-index: 10; }
-  #viewer { padding: 16px; display: grid; gap: 28px; justify-content: center; }
-  .page-wrap { position: relative; display: inline-block; background: white; box-shadow: 0 2px 18px rgba(0,0,0,0.08); }
-  .pdf-canvas { display: block; }
+  :root { color-scheme: light dark; --toolbar-bg:#ffffff; --border:#e6e6e6; --shadow:0 2px 16px rgba(0,0,0,.06); }
+  /* --- Layout --- */
+  html, body { height: 100%; }
+  body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #f7f7f7; overscroll-behavior: none; }
+  #toolbar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+    background: var(--toolbar-bg); border-bottom: 1px solid var(--border); box-shadow: var(--shadow);
+    padding: 8px 10px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  }
+  #viewport {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    /* top is set dynamically equal to toolbar height (so it’s always below) */
+    overflow: hidden; /* we pan inside with transforms */
+    background: #f7f7f7;
+    touch-action: none; /* we’ll toggle this in JS depending on tool */
+  }
+  /* Pages container that we transform (translate+scale) for zoom/pan */
+  #content {
+    position: absolute; top: 0; left: 0;
+    transform-origin: 0 0;
+  }
+  /* Pages list */
+  #pages { padding: 14px; display: grid; gap: 22px; justify-content: center; }
+  .page-wrap { position: relative; display: inline-block; background: #fff; box-shadow: var(--shadow); }
+
+  .pdf-canvas { display: block; width: 100%; height: auto; }
   .ink-canvas { position: absolute; inset: 0; cursor: crosshair; touch-action: none; }
-  .text-layer { position: absolute; inset: 0; pointer-events: none; } /* toggled to auto for Text tool */
+  .text-layer { position: absolute; inset: 0; pointer-events: none; }
   .text-item { position: absolute; min-width: 8px; outline: 1px dashed transparent; white-space: pre; background: transparent; color: black; }
   .text-item[contenteditable="true"] { outline-color: #8bb; background: #f7faff; }
 
-  /* Controls */
-  .tool-btn, .dropdown-btn { border: 1px solid #ddd; background: #fff; color: black; border-radius: 6px; padding: 6px 10px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+  /* --- Controls --- */
+  .tool-btn, .dropdown-btn {
+    border: 1px solid #ddd; background: #fff; color: black; border-radius: 7px;
+    padding: 6px 10px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+  }
   .tool-btn:hover, .dropdown-btn:hover { background: #f4f4f4; }
   .tool-btn.active { border-color: #1e88e5; box-shadow: 0 0 0 2px rgba(30,136,229,.15) inset; }
-  .icon { font-size: 16px; }
+  .icon { font-size: 16px; line-height: 1; }
   .palette { display: inline-flex; gap: 6px; align-items: center; }
   .swatch { width: 22px; height: 22px; border-radius: 50%; border: 2px solid #ccc; cursor: pointer; box-sizing: border-box; }
   .swatch.selected { border-color: #000; outline: 2px solid #0003; }
   .sizes { position: relative; display: inline-block; }
-  .size-menu { position: absolute; top: 100%; left: 0; margin-top: 4px; background: #fff; border: 1px solid #ddd; border-radius: 8px; box-shadow: 0 6px 18px rgba(0,0,0,.1); padding: 6px; display: none; z-index: 20; }
+  .size-menu { position: absolute; top: 100%; left: 0; margin-top: 4px; background: #fff; border: 1px solid #ddd; border-radius: 8px; box-shadow: 0 6px 18px rgba(0,0,0,.1); padding: 6px; display: none; z-index: 2000; }
   .size-menu.open { display: block; }
   .size-option { display: flex; align-items: center; gap: 8px; padding: 6px 8px; cursor: pointer; border-radius: 6px; }
   .size-option:hover { background: #f5f5f5; }
   .size-dot { width: 36px; height: 0; border-radius: 6px; background: currentColor; }
-  .grow { flex: 1; }
-  button { color: black; } /* ensure black text on all buttons */
-  #diag { font-size: 12px; color: #666; padding: 6px 12px; border-bottom: 1px dashed #ccc; }
+  .grow { flex: 1 1 auto; min-width: 24px; }
+  .zoom-group { display: inline-flex; gap: 6px; align-items: center; }
+  .zoom-label { min-width: 64px; text-align: center; }
+
+  /* Cursors for hand tool */
+  .hand-grab     { cursor: grab !important; }
+  .hand-grabbing { cursor: grabbing !important; }
+
+  /* Small screens: compact toolbar */
+  @media (max-width: 480px) {
+    .tool-btn span.txt { display: none; } /* show only icons */
+    .zoom-label { display: none; }
+  }
 </style>
 </head>
 <body>
+  <!-- ===== Toolbar (fixed) ===== -->
   <div id="toolbar">
     <input type="file" id="file" accept="application/pdf" />
 
-    <!-- Tools -->
     <button id="tool-pen" class="tool-btn active" title="Draw (Apple Pencil / mouse)">
-      <span class="icon">✏️</span><span>Draw</span>
+      <span class="icon">✏️</span><span class="txt">Draw</span>
     </button>
     <button id="tool-eraser" class="tool-btn" title="Erase strokes">
-      <span class="icon">🧽</span><span>Eraser</span>
+      <span class="icon">🧽</span><span class="txt">Eraser</span>
+    </button>
+    <button id="tool-hand" class="tool-btn" title="Move / pan / pinch‑zoom">
+      <span class="icon">✋</span><span class="txt">Move</span>
     </button>
     <button id="tool-text" class="tool-btn" title="Text tool">
-      <span class="icon">🅰️</span><span>Text</span>
+      <span class="icon">🅰️</span><span class="txt">Text</span>
     </button>
 
-    <!-- Palette -->
+    <!-- Palette (8 colors) -->
     <div class="palette" aria-label="Color palette">
       <div class="swatch" data-color="#000000" style="background:#000000"></div>
       <div class="swatch" data-color="#D32F2F" style="background:#D32F2F"></div>
@@ -65,84 +101,140 @@
     <!-- Size dropdown -->
     <div class="sizes">
       <button id="size-btn" class="dropdown-btn" title="Choose size"><span class="icon">⬇️</span><span id="size-label">Size: 3</span></button>
-      <div id="size-menu" class="size-menu" role="menu" aria-label="Size">
-        <!-- options filled by JS -->
-      </div>
+      <div id="size-menu" class="size-menu" role="menu" aria-label="Size"></div>
     </div>
 
     <div class="grow"></div>
-    <button id="undo" class="tool-btn" type="button" title="Undo last stroke on current page">Undo</button>
-    <button id="clear" class="tool-btn" type="button" title="Clear strokes on current page">Clear page</button>
-    <button id="export" class="tool-btn" type="button" title="Export annotated PDF">Export (vector)</button>
+
+    <!-- Zoom controls (handy on phones) -->
+    <div class="zoom-group">
+      <button id="zoom-out" class="tool-btn" title="Zoom out"><span class="icon">➖</span></button>
+      <div id="zoom-value" class="zoom-label">100%</div>
+      <button id="zoom-in" class="tool-btn" title="Zoom in"><span class="icon">➕</span></button>
+      <button id="zoom-reset" class="tool-btn" title="Reset zoom"><span class="icon">⟲</span></button>
+    </div>
+
+    <button id="undo" class="tool-btn" type="button" title="Undo on current page">Undo</button>
+    <button id="clear" class="tool-btn" type="button" title="Clear strokes & text on current page">Clear</button>
+    <button id="export" class="tool-btn" type="button" title="Export annotated PDF">Export</button>
   </div>
 
-  <div id="diag"></div>
-  <div id="viewer"></div>
+  <!-- ===== Stage (auto-sized under the fixed toolbar) ===== -->
+  <div id="viewport">
+    <div id="content">
+      <div id="pages"></div>
+    </div>
+  </div>
 
-  <!-- PDF.js 2.x (worker disabled below for file:// usage) -->
+  <!-- PDF.js 2.x (worker disabled below for maximum compatibility) -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
   <!-- pdf-lib -->
   <script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
 
   <script>
-    // ===== Diagnostics =====
-    const diag = document.getElementById('diag');
-    function logDiag(msg) { console.log('[Annotator]', msg); diag.textContent = msg; }
-
-    // PDF.js setup for file://
-    if (window.pdfjsLib) {
-      pdfjsLib.GlobalWorkerOptions.workerSrc = null;
-      pdfjsLib.disableWorker = true;
-      logDiag('PDF.js loaded (worker disabled for file://).');
-    } else {
-      logDiag('Error: PDF.js failed to load from CDN.');
+    /***** Toolbar layout: keep viewport below fixed toolbar *****/
+    const toolbar = document.getElementById('toolbar');
+    const viewport = document.getElementById('viewport');
+    function syncViewportTop(){
+      const h = toolbar.getBoundingClientRect().height;
+      viewport.style.top = h + 'px';
     }
-    if (!window.PDFLib) logDiag('Error: pdf-lib failed to load from CDN.');
+    window.addEventListener('load', syncViewportTop);
+    window.addEventListener('resize', syncViewportTop);
+    // Fallback if fonts change height later
+    setTimeout(syncViewportTop, 500);
 
-    // ===== DOM refs =====
-    const viewer = document.getElementById('viewer');
+    /***** Diagnostics (optional) *****/
+    if (window.pdfjsLib) {
+      // For file:// you’d disable worker; on GitHub Pages either mode works.
+      pdfjsLib.GlobalWorkerOptions.workerSrc = null; // run without worker for portability
+      pdfjsLib.disableWorker = true;
+    }
+
+    /***** DOM refs *****/
+    const pagesEl = document.getElementById('pages');
     const fileInput = document.getElementById('file');
-    const undoBtn = document.getElementById('undo');
-    const clearBtn = document.getElementById('clear');
-    const exportBtn = document.getElementById('export');
     const toolPenBtn = document.getElementById('tool-pen');
     const toolEraserBtn = document.getElementById('tool-eraser');
+    const toolHandBtn = document.getElementById('tool-hand');
     const toolTextBtn = document.getElementById('tool-text');
     const sizeBtn = document.getElementById('size-btn');
     const sizeMenu = document.getElementById('size-menu');
     const sizeLabel = document.getElementById('size-label');
-    const palette = document.querySelector('.palette');
+    const zoomInBtn = document.getElementById('zoom-in');
+    const zoomOutBtn = document.getElementById('zoom-out');
+    const zoomResetBtn = document.getElementById('zoom-reset');
+    const zoomValue = document.getElementById('zoom-value');
+    const undoBtn = document.getElementById('undo');
+    const clearBtn = document.getElementById('clear');
+    const exportBtn = document.getElementById('export');
 
-    // ===== State =====
+    /***** State *****/
     const SIZES = [1,2,3,4,6,8,12];
-    let currentTool = 'pen'; // 'pen' | 'eraser' | 'text'
+    let currentTool = 'pen'; // 'pen' | 'eraser' | 'hand' | 'text'
     let currentColor = '#000000';
     let brushSize = 3;
-    let textSize = 16; // px
+    let textSize = 16;
+
     let pdfDocJS = null;
     let pdfBytesOriginal = null;
 
-    // Per page:
-    // strokes: [{ color, size, points:[{x,y,pressure}] }]
-    // texts  : [{ x, y, color, size, value }]
-    const pageData = []; // index = page - 1
-    const pageLayers = []; // store layers per page: {inkCanvas, textLayer, wrap}
+    // Per page: strokes + texts + viewport dims used during rendering
+    const pageData = [];       // [{strokes:[], texts:[], viewportWidth, viewportHeight}, ...]
+    const pageLayers = [];     // [{wrap, pdfCanvas, inkCanvas, textLayer}, ...]
 
-    // Initialize palette default selection
+    // View transform (pan/zoom) applied to #content
+    const content = document.getElementById('content');
+    const view = { scale: 1, min: 0.5, max: 3, tx: 0, ty: 0 };
+    function applyView(){
+      content.style.transform = `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})`;
+      zoomValue.textContent = Math.round(view.scale*100) + '%';
+    }
+    function zoomAt(point, newScale){
+      // point in screen coords (clientX, clientY)
+      newScale = Math.max(view.min, Math.min(view.max, newScale));
+      const oldScale = view.scale;
+      if (Math.abs(newScale - oldScale) < 1e-6) return;
+
+      // Compute world coord under pointer before zoom
+      const rect = content.getBoundingClientRect();
+      const wx = (point.x - rect.left - view.tx) / oldScale;
+      const wy = (point.y - rect.top  - view.ty) / oldScale;
+
+      // New translation so that same world point stays under finger
+      view.scale = newScale;
+      view.tx = point.x - rect.left - wx * view.scale;
+      view.ty = point.y - rect.top  - wy * view.scale;
+      applyView();
+    }
+    function centerAndFitToWidth(){
+      // Fit first page width to viewport width
+      const firstWrap = pageLayers[0]?.wrap;
+      if (!firstWrap) return;
+      const pageW = firstWrap.getBoundingClientRect().width / view.scale; // unscaled width
+      const vpW = viewport.clientWidth;
+      const s = vpW / pageW;
+      view.scale = Math.max(view.min, Math.min(view.max, s));
+      // Center horizontally, top aligned
+      view.tx = (vpW - pageW * view.scale) / 2;
+      view.ty = 0;
+      applyView();
+    }
+
+    /***** Palette *****/
     (function initPalette(){
       const swatches = document.querySelectorAll('.swatch');
-      swatches.forEach((sw,i) => {
+      swatches.forEach((sw) => {
         sw.addEventListener('click', () => {
           swatches.forEach(s=>s.classList.remove('selected'));
           sw.classList.add('selected');
           currentColor = sw.dataset.color;
         });
       });
-      // select first
       swatches[0].classList.add('selected');
     })();
 
-    // Build size menu
+    /***** Size menu *****/
     (function initSizeMenu(){
       SIZES.forEach(size => {
         const row = document.createElement('div');
@@ -158,7 +250,7 @@
         row.appendChild(label);
         row.addEventListener('click', () => {
           if (currentTool === 'text') {
-            textSize = Math.max(10, size * 4); // simple mapping: brush 1→ font 12-ish
+            textSize = Math.max(10, size * 4);
             sizeLabel.textContent = `Text: ${textSize}px`;
           } else {
             brushSize = size;
@@ -169,89 +261,87 @@
         sizeMenu.appendChild(row);
       });
       sizeLabel.textContent = `Size: ${brushSize}`;
-      
-sizeBtn.addEventListener('click', (e) => {
-  e.stopPropagation();
-  sizeMenu.classList.toggle('open');
-});
 
-      
+      // Fix: clicks on icon/text inside button should open menu
+      sizeBtn.addEventListener('click', (e) => { e.stopPropagation(); sizeMenu.classList.toggle('open'); });
       document.addEventListener('click', (e)=>{
-      if (!sizeMenu.contains(e.target) && !sizeBtn.contains(e.target)) {
-        sizeMenu.classList.remove('open');
-      }
-    });
+        if (!sizeMenu.contains(e.target) && !sizeBtn.contains(e.target)) sizeMenu.classList.remove('open');
+      });
     })();
 
-    // Tool switching
+    /***** Tools switching *****/
     function setTool(tool){
       currentTool = tool;
       toolPenBtn.classList.toggle('active', tool==='pen');
       toolEraserBtn.classList.toggle('active', tool==='eraser');
+      toolHandBtn.classList.toggle('active', tool==='hand');
       toolTextBtn.classList.toggle('active', tool==='text');
 
-      // Toggle pointer-events for text layers
+      // Cursor and interactivity
       pageLayers.forEach(l => {
         if (!l) return;
         l.textLayer.style.pointerEvents = (tool==='text') ? 'auto' : 'none';
-        l.inkCanvas.style.cursor = (tool==='eraser') ? 'cell' : 'crosshair';
+        if (tool === 'eraser')       l.inkCanvas.classList.remove('hand-grab', 'hand-grabbing'), l.inkCanvas.style.cursor = 'cell';
+        else if (tool === 'hand')    l.inkCanvas.classList.add('hand-grab'), l.inkCanvas.style.cursor = 'grab';
+        else                         l.inkCanvas.classList.remove('hand-grab', 'hand-grabbing'), l.inkCanvas.style.cursor = 'crosshair';
       });
 
-      // Update size label mode
+      // Enable/disable viewport native touch actions
+      viewport.style.touchAction = (tool==='hand') ? 'none' : 'none'; // keep none to avoid browser pinch-zoom interfering
+
+      // Size label mode
       if (tool==='text') sizeLabel.textContent = `Text: ${textSize}px`;
-      else sizeLabel.textContent = `Size: ${brushSize}`;
+      else               sizeLabel.textContent = `Size: ${brushSize}`;
     }
     toolPenBtn.addEventListener('click', ()=>setTool('pen'));
     toolEraserBtn.addEventListener('click', ()=>setTool('eraser'));
+    toolHandBtn.addEventListener('click', ()=>setTool('hand'));
     toolTextBtn.addEventListener('click', ()=>setTool('text'));
 
-    // File loader
+    /***** File load *****/
     fileInput.addEventListener('change', async (e) => {
       try {
         const file = e.target.files?.[0];
         if (!file) return;
         pdfBytesOriginal = await file.arrayBuffer();
         await loadPDF(pdfBytesOriginal);
+        centerAndFitToWidth();
       } catch (err) {
         console.error(err);
-        logDiag('Failed to load PDF. See console for details.');
         alert('Failed to load PDF. See console for details.');
       }
     });
 
     async function loadPDF(arrayBuffer) {
-      viewer.innerHTML = '';
-      pageData.length = 0;
-      pageLayers.length = 0;
+      pagesEl.innerHTML = '';
+      pageData.length = 0; pageLayers.length = 0;
 
-      logDiag('Loading PDF…');
       const task = pdfjsLib.getDocument({ data: arrayBuffer });
       pdfDocJS = await task.promise;
-      logDiag(`PDF loaded: ${pdfDocJS.numPages} page(s).`);
 
       for (let i = 1; i <= pdfDocJS.numPages; i++) {
         const page = await pdfDocJS.getPage(i);
-        const scale = 1.5;
-        const viewport = page.getViewport({ scale });
+        const scale = 1.5;  // rendering resolution (independent of zoom)
+        const viewportJS = page.getViewport({ scale });
 
         const wrap = document.createElement('div');
         wrap.className = 'page-wrap';
-        wrap.style.width  = viewport.width + 'px';
-        wrap.style.height = viewport.height + 'px';
+        wrap.style.width  = viewportJS.width + 'px';
+        wrap.style.height = viewportJS.height + 'px';
 
         const pdfCanvas = document.createElement('canvas');
         pdfCanvas.className = 'pdf-canvas';
-        pdfCanvas.width  = viewport.width;
-        pdfCanvas.height = viewport.height;
+        pdfCanvas.width  = viewportJS.width;
+        pdfCanvas.height = viewportJS.height;
         wrap.appendChild(pdfCanvas);
 
         const ctx = pdfCanvas.getContext('2d', { alpha: false });
-        await page.render({ canvasContext: ctx, viewport }).promise;
+        await page.render({ canvasContext: ctx, viewport: viewportJS }).promise;
 
         const inkCanvas = document.createElement('canvas');
         inkCanvas.className = 'ink-canvas';
-        inkCanvas.width  = viewport.width;
-        inkCanvas.height = viewport.height;
+        inkCanvas.width  = viewportJS.width;
+        inkCanvas.height = viewportJS.height;
         wrap.appendChild(inkCanvas);
 
         const textLayer = document.createElement('div');
@@ -261,21 +351,27 @@ sizeBtn.addEventListener('click', (e) => {
         pageData[i-1] = {
           strokes: [],
           texts: [],
-          viewportWidth: viewport.width,
-          viewportHeight: viewport.height
+          viewportWidth: viewportJS.width,
+          viewportHeight: viewportJS.height
         };
-        pageLayers[i-1] = { inkCanvas, textLayer, wrap };
+        pageLayers[i-1] = { wrap, pdfCanvas, inkCanvas, textLayer };
 
         setupPageInteractions(i-1);
-        viewer.appendChild(wrap);
+        pagesEl.appendChild(wrap);
       }
 
-      // Respect current tool (esp. text layer pointer events)
+      // After all pages, size content to include all pages
+      requestAnimationFrame(() => {
+        const r = pagesEl.getBoundingClientRect();
+        content.style.width = r.width + 'px';
+        content.style.height = r.height + 'px';
+      });
+
+      // Respect current tool on fresh load
       setTool(currentTool);
-      logDiag('Ready. Use the toolbar to draw, erase, color, size, or add text.');
     }
 
-    // ----- Per-page interactions -----
+    /***** Per-page interactions *****/
     function setupPageInteractions(pageIndex){
       const { inkCanvas, textLayer } = pageLayers[pageIndex];
       const ctx = inkCanvas.getContext('2d');
@@ -286,9 +382,7 @@ sizeBtn.addEventListener('click', (e) => {
 
       function redraw() {
         ctx.clearRect(0,0,inkCanvas.width, inkCanvas.height);
-        // re-draw strokes
         for (const s of pageData[pageIndex].strokes) drawStroke(ctx, s);
-        // text layer is HTML elements, no need to draw here
       }
 
       function drawStroke(ctx, stroke) {
@@ -317,7 +411,7 @@ sizeBtn.addEventListener('click', (e) => {
       }
 
       function getPosOnCanvas(e, canvas) {
-        const rect = canvas.getBoundingClientRect();
+        const rect = canvas.getBoundingClientRect(); // includes transform
         return {
           x: (e.clientX - rect.left) * (canvas.width  / rect.width),
           y: (e.clientY - rect.top)  * (canvas.height / rect.height),
@@ -325,7 +419,7 @@ sizeBtn.addEventListener('click', (e) => {
         };
       }
 
-      // Pen & Eraser pointer events on the ink canvas
+      // --- Pen / Eraser interactions on the ink canvas ---
       inkCanvas.addEventListener('pointerdown', (e) => {
         if (currentTool === 'pen') {
           inkCanvas.setPointerCapture(e.pointerId);
@@ -354,12 +448,13 @@ sizeBtn.addEventListener('click', (e) => {
       });
 
       function endStroke(e) {
-        if (currentTool !== 'pen' || !drawing) return;
-        currentStroke.points.push(getPosOnCanvas(e, inkCanvas));
-        pageData[pageIndex].strokes.push(currentStroke);
-        drawing = false;
-        currentStroke = null;
-        redraw();
+        if (currentTool === 'pen' && drawing) {
+          currentStroke.points.push(getPosOnCanvas(e, inkCanvas));
+          pageData[pageIndex].strokes.push(currentStroke);
+          drawing = false;
+          currentStroke = null;
+          redraw();
+        }
       }
       inkCanvas.addEventListener('pointerup', endStroke);
       inkCanvas.addEventListener('pointercancel', endStroke);
@@ -379,19 +474,13 @@ sizeBtn.addEventListener('click', (e) => {
       }
       function strokeIntersectsCircle(stroke, pos, r){
         const pts = stroke.points;
-        // Quick bbox check
         let minx=Infinity,miny=Infinity,maxx=-Infinity,maxy=-Infinity;
         for (const p of pts){ if(p.x<minx)minx=p.x; if(p.y<miny)miny=p.y; if(p.x>maxx)maxx=p.x; if(p.y>maxy)maxy=p.y; }
         if (pos.x < minx-r || pos.x > maxx+r || pos.y < miny-r || pos.y > maxy+r) return false;
-        // Segment distance check
         for (let i=1;i<pts.length;i++){
           if (pointToSegmentDist(pos, pts[i-1], pts[i]) <= r) return true;
         }
-        // Also check a single dot stroke
-        if (pts.length===1) {
-          const dx = pos.x - pts[0].x, dy = pos.y - pts[0].y;
-          return Math.hypot(dx,dy) <= r;
-        }
+        if (pts.length===1) return Math.hypot(pos.x-pts[0].x, pos.y-pts[0].y) <= r;
         return false;
       }
       function pointToSegmentDist(p, a, b){
@@ -406,14 +495,13 @@ sizeBtn.addEventListener('click', (e) => {
         return Math.hypot(p.x-px, p.y-py);
       }
 
-      // Text tool (click to place)
+      // Text tool (click to place and type)
       textLayer.addEventListener('pointerdown', (e) => {
         if (currentTool !== 'text') return;
         const rect = textLayer.getBoundingClientRect();
         const x = (e.clientX - rect.left) * (inkCanvas.width  / rect.width);
         const y = (e.clientY - rect.top)  * (inkCanvas.height / rect.height);
 
-        // Create DOM text item for on-screen editing
         const el = document.createElement('div');
         el.className = 'text-item';
         el.contentEditable = 'true';
@@ -422,20 +510,17 @@ sizeBtn.addEventListener('click', (e) => {
         el.style.color = currentColor;
         el.style.fontSize = `${textSize}px`;
         el.style.lineHeight = '1.2';
-        el.style.pointerEvents = 'auto'; // allow interaction when tool is text
+        el.style.pointerEvents = 'auto';
         el.textContent = '';
         textLayer.appendChild(el);
         el.focus();
 
-        // Save item in model
         const item = { x, y, color: currentColor, size: textSize, value: '' };
         pageData[pageIndex].texts.push(item);
 
-        // Commit on blur or Enter
         function commit(){
           item.value = el.textContent || '';
           if (item.value.trim() === '') {
-            // remove empty
             const idx = pageData[pageIndex].texts.indexOf(item);
             if (idx>=0) pageData[pageIndex].texts.splice(idx,1);
             el.remove();
@@ -445,58 +530,118 @@ sizeBtn.addEventListener('click', (e) => {
         }
         function onKey(ev){
           if (ev.key === 'Escape') { el.blur(); }
-          if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) {
-            el.blur();
-          }
+          if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { el.blur(); }
         }
         el.addEventListener('blur', commit);
         el.addEventListener('keydown', onKey);
-
-        // Allow re-edit on double click (only when Text tool active)
         el.addEventListener('dblclick', () => { if (currentTool==='text') { el.contentEditable='true'; el.focus(); } });
-        // When switching away from Text tool, freeze editing
         document.addEventListener('tool-change', ()=>{ el.contentEditable = (currentTool==='text') ? 'true' : 'false'; });
       });
 
-      // Toolbar actions scoped to current page
+      // Toolbar actions (page-local)
       undoBtn.addEventListener('click', () => {
-        if (pageData[pageIndex].strokes.length > 0) {
-          pageData[pageIndex].strokes.pop();
-          redraw();
-        }
+        if (pageData[pageIndex].strokes.length > 0) { pageData[pageIndex].strokes.pop(); redraw(); }
       });
-
       clearBtn.addEventListener('click', () => {
         pageData[pageIndex].strokes = [];
-        // Clear text DOM & model on this page
         pageData[pageIndex].texts = [];
         textLayer.innerHTML = '';
         redraw();
       });
     }
 
-    // Inform all elements about tool changes (for text editability)
     function broadcastToolChange(){ document.dispatchEvent(new Event('tool-change')); }
     ['click'].forEach(ev=>{
       toolPenBtn.addEventListener(ev, broadcastToolChange);
       toolEraserBtn.addEventListener(ev, broadcastToolChange);
+      toolHandBtn.addEventListener(ev, broadcastToolChange);
       toolTextBtn.addEventListener(ev, broadcastToolChange);
     });
 
-    // ----- Export (vector) -----
+    /***** Pan & Pinch‑Zoom on the whole content (when Move tool active) *****/
+    const activePointers = new Map(); // id -> {x,y}
+    let handDragging = false;
+    let handStart = { x:0, y:0, tx:0, ty:0 };
+    let pinchStart = null; // {dist, cx, cy, scale, tx, ty}
+
+    function pointerPos(e){ return { x: e.clientX, y: e.clientY }; }
+
+    viewport.addEventListener('pointerdown', (e) => {
+      if (currentTool !== 'hand') return;
+      viewport.setPointerCapture(e.pointerId);
+      activePointers.set(e.pointerId, pointerPos(e));
+
+      if (activePointers.size === 1) {
+        // start drag
+        handDragging = true;
+        handStart = { x: e.clientX, y: e.clientY, tx: view.tx, ty: view.ty };
+        // nicer cursor
+        pageLayers.forEach(l => l?.inkCanvas.classList.add('hand-grabbing'));
+        e.preventDefault();
+      } else if (activePointers.size === 2) {
+        // start pinch
+        const pts = Array.from(activePointers.values());
+        const dx = pts[1].x - pts[0].x, dy = pts[1].y - pts[0].y;
+        const dist = Math.hypot(dx, dy);
+        const cx = (pts[0].x + pts[1].x) / 2, cy = (pts[0].y + pts[1].y) / 2;
+        pinchStart = { dist, cx, cy, scale: view.scale, tx: view.tx, ty: view.ty };
+        handDragging = false;
+        e.preventDefault();
+      }
+    });
+
+    viewport.addEventListener('pointermove', (e) => {
+      if (currentTool !== 'hand') return;
+      if (!activePointers.has(e.pointerId)) return;
+
+      activePointers.set(e.pointerId, pointerPos(e));
+
+      if (activePointers.size === 1 && handDragging) {
+        // pan
+        view.tx = handStart.tx + (e.clientX - handStart.x);
+        view.ty = handStart.ty + (e.clientY - handStart.y);
+        applyView();
+        e.preventDefault();
+      } else if (activePointers.size === 2 && pinchStart) {
+        const pts = Array.from(activePointers.values());
+        const dx = pts[1].x - pts[0].x, dy = pts[1].y - pts[0].y;
+        const dist = Math.hypot(dx, dy);
+        const scale = Math.max(view.min, Math.min(view.max, pinchStart.scale * dist / pinchStart.dist));
+        // Zoom around pinch center
+        zoomAt({x: pinchStart.cx, y: pinchStart.cy}, scale);
+        e.preventDefault();
+      }
+    });
+
+    function endPointer(e){
+      if (currentTool !== 'hand') return;
+      activePointers.delete(e.pointerId);
+      if (activePointers.size < 2) pinchStart = null;
+      if (activePointers.size === 0) {
+        handDragging = false;
+        pageLayers.forEach(l => l?.inkCanvas.classList.remove('hand-grabbing'));
+      }
+    }
+    viewport.addEventListener('pointerup', endPointer);
+    viewport.addEventListener('pointercancel', endPointer);
+    viewport.addEventListener('pointerleave', endPointer);
+
+    // Zoom buttons
+    zoomInBtn.addEventListener('click', () => zoomAt({x: viewport.clientWidth/2, y: viewport.clientHeight/2}, view.scale*1.2));
+    zoomOutBtn.addEventListener('click', () => zoomAt({x: viewport.clientWidth/2, y: viewport.clientHeight/2}, view.scale/1.2));
+    zoomResetBtn.addEventListener('click', () => { centerAndFitToWidth(); });
+
+    /***** Export (vector strokes + text) *****/
     exportBtn.addEventListener('click', async () => {
       try {
         if (!pdfBytesOriginal || !pageData.length) {
           alert('Load a PDF and add some content first.');
           return;
         }
-
         const { PDFDocument, rgb, LineCapStyle, LineJoinStyle, StandardFonts } = PDFLib;
         const srcPdf = await PDFDocument.load(pdfBytesOriginal);
         const outPdf = await PDFDocument.create();
         const copied = await outPdf.copyPages(srcPdf, srcPdf.getPageIndices());
-
-        // Embed one font for all text
         const font = await outPdf.embedFont(StandardFonts.Helvetica);
 
         for (let i = 0; i < copied.length; i++) {
@@ -510,7 +655,7 @@ sizeBtn.addEventListener('click', (e) => {
           const scaleY = ph / screenH;
           const scaleAvg = (scaleX + scaleY) / 2;
 
-          // Strokes as vector lines
+          // Strokes
           for (const s of pageData[i].strokes) {
             const col = hexToRgb(s.color);
             const color = rgb(col.r/255, col.g/255, col.b/255);
@@ -522,36 +667,29 @@ sizeBtn.addEventListener('click', (e) => {
               const x = p0.x * scaleX;
               const y = ph - (p0.y * scaleY);
               const thickness = Math.max(0.5, s.size * (p0.pressure || 1) * scaleAvg);
-              page.drawLine({
-                start: { x, y }, end: { x: x + 0.01, y },
-                thickness, color, lineCap: LineCapStyle.Round
-              });
+              page.drawLine({ start: { x, y }, end: { x: x + 0.01, y }, thickness, color, lineCap: LineCapStyle.Round });
               continue;
             }
-
             for (let k = 1; k < pts.length; k++) {
               const a = pts[k-1], b = pts[k];
               const x1 = a.x * scaleX, y1 = ph - (a.y * scaleY);
               const x2 = b.x * scaleX, y2 = ph - (b.y * scaleY);
               const thickness = Math.max(0.5, s.size * (b.pressure || 1) * scaleAvg);
               page.drawLine({
-                start: { x: x1, y: y1 },
-                end:   { x: x2, y: y2 },
-                thickness, color,
-                lineCap: LineCapStyle.Round, lineJoin: LineJoinStyle.Round
+                start: { x: x1, y: y1 }, end: { x: x2, y: y2 },
+                thickness, color, lineCap: LineCapStyle.Round, lineJoin: LineJoinStyle.Round
               });
             }
           }
 
-          // Text items
+          // Text
           for (const t of pageData[i].texts) {
             const col = hexToRgb(t.color);
             const color = rgb(col.r/255, col.g/255, col.b/255);
             const sizePts = t.size * scaleAvg;
             const x = t.x * scaleX;
-            // PDF origin is bottom-left; HTML text top-left → subtract ascent approximation
             const yTop = t.y * scaleY;
-            const y = ph - yTop - sizePts * 0.8; // rough ascent factor
+            const y = ph - yTop - sizePts * 0.8;
             if (t.value && t.value.trim() !== '') {
               page.drawText(t.value, { x, y, size: sizePts, font, color, lineHeight: sizePts * 1.2 });
             }
@@ -559,7 +697,7 @@ sizeBtn.addEventListener('click', (e) => {
         }
 
         const outBytes = await outPdf.save();
-        downloadBlob(new Blob([outBytes], { type: 'application/pdf' }), 'annotated-vector.pdf');
+        downloadBlob(new Blob([outBytes], { type: 'application/pdf' }), 'annotated.pdf');
       } catch (err) {
         console.error(err);
         alert('Export failed. See console for details.');
@@ -579,7 +717,10 @@ sizeBtn.addEventListener('click', (e) => {
       const num = parseInt(c, 16);
       return { r: (num>>16)&255, g: (num>>8)&255, b: num&255 };
     }
+
+    // Init
+    applyView();
+    setTool('pen');
   </script>
 </body>
 </html>
-``
